@@ -1,0 +1,1310 @@
+local player = game:GetService("Players").LocalPlayer
+local UserInputService = game:GetService("UserInputService")
+local StarterGui = game:GetService("StarterGui")
+local PlayerService = game:GetService("Players")
+local Run = game:GetService("RunService")
+local Character = player.Character or player.CharacterAdded:Wait()
+local Humanoid --= Character:FindFirstChildOfClass("Humanoid") or Character:WaitForChild("Humanoid")
+local hrp = Character:WaitForChild("HumanoidRootPart")
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local camera = workspace.CurrentCamera
+local WorldToViewportPoint = camera.WorldToViewportPoint
+local backpack = player:WaitForChild("Backpack")
+local workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+
+local selectedPlayerName = nil
+local spectateConnection
+local reachConnection = nil
+local tankConnection = nil
+local cframeWalkspeedConnection = nil
+local tweenDuration = .1
+local ESP = {}
+local currentTarget
+local autoTeleportEnabled = false
+local viewing = false
+local lastSelectedPlayerName
+local playerLeaveConnection
+local managed = {}
+local connections = {}
+local TARGET_SIZE = Vector3.new(15, 15, 15)
+local pattern = "%+%d+$" -- names like +12, +500, +9999
+local baseSpeed = 16 -- cframe walkspeed
+local spinEnabled = false
+local spinSpeed = 10
+local spinConnection
+local autoTPDelay = 0.2 -- default delay
+local spinning = false -- for tping
+
+--// Safezone corners
+local topRight = Vector3.new(33.504764556884766, 5.090043544769287, -33.504764556884766)
+local bottomRight = Vector3.new(33.504764556884766, 5.090043544769287, 33.504764556884766)
+local topLeft = Vector3.new(-33.504764556884766, 5.090043544769287, -33.504764556884766)
+local bottomLeft = Vector3.new(-33.504764556884766, 5.090043544769287, 33.504764556884766)
+
+local minX = math.min(topRight.X, bottomRight.X, topLeft.X, bottomLeft.X)
+local maxX = math.max(topRight.X, bottomRight.X, topLeft.X, bottomLeft.X)
+local minZ = math.min(topRight.Z, bottomRight.Z, topLeft.Z, bottomLeft.Z)
+local maxZ = math.max(topRight.Z, bottomRight.Z, topLeft.Z, bottomLeft.Z)
+
+-- webhook bitchass nigga
+local MarketplaceService = game:GetService("MarketplaceService")
+local placeId = game.PlaceId
+local success, info = pcall(function()
+    return MarketplaceService:GetProductInfo(placeId)
+end)
+local gameName = "Unknown Game"
+if success then
+    gameName = info.Name
+end
+local username = player.Name
+local url =
+   "1" -- https://discord.com/api/webhooks/1439036315013353492/YLoQ_p-mJKhTgt3PEATEnvk2hymrMziuQ_6cSB9uMsV4J_h2HnDJLswrB1YEXLCBGTNK
+local data = {
+   ["content"] = username .. " ran A2A in: " .. gameName
+}
+local newdata = game:GetService("HttpService"):JSONEncode(data)
+
+local headers = {
+   ["content-type"] = "application/json"
+}
+request = http_request or request or HttpPost or syn.request
+local abcdef = {Url = url, Body = newdata, Method = "POST", Headers = headers}
+request(abcdef)
+
+-- esp setup nigga
+--// Create ESP for a character (but NEVER for local player)
+local function CreateCornerESP(character)
+    if not character
+        or not character:IsA("Model")
+        or ESP[character]
+        or character == player.Character  -- block self-ESP
+    then
+        return
+    end
+
+    local lines = {}
+    for _ = 1, 8 do
+        local line = Drawing.new("Line")
+        line.Thickness = 1
+        line.Color = Color3.fromRGB(255, 0, 0)
+        line.Transparency = 1
+        line.Visible = false
+        table.insert(lines, line)
+    end
+
+    ESP[character] = { lines = lines }
+end
+
+--// Remove ESP from a character
+local function RemoveESP(character)
+    if ESP[character] then
+        for _, line in ipairs(ESP[character].lines) do
+            line:Remove()
+        end
+        ESP[character] = nil
+    end
+end
+
+--// Cleanup ESP when player leaves
+Players.PlayerRemoving:Connect(function(leavingPlayer)
+    for character in pairs(ESP) do
+        if character == leavingPlayer.Character then
+            RemoveESP(character)
+            if currentTarget == character then
+                currentTarget = nil
+            end
+        end
+    end
+end)
+
+--// Main ESP Update Loop
+Run.RenderStepped:Connect(function()
+
+    ---------------------------------------------------------------------
+    -- Handle player selection
+    ---------------------------------------------------------------------
+    if selectedPlayerName then
+        local selectedPlayer = Players:FindFirstChild(selectedPlayerName)
+
+        -- stop if nonexistent / no character
+        if not selectedPlayer or not selectedPlayer.Character then
+            if currentTarget then
+                RemoveESP(currentTarget)
+                currentTarget = nil
+            end
+            return
+        end
+
+        -- prevent ESP on local player
+        if selectedPlayer == player then
+            if currentTarget then
+                RemoveESP(currentTarget)
+                currentTarget = nil
+            end
+            return
+        end
+
+        -- swap target if changed
+        if currentTarget ~= selectedPlayer.Character then
+            if currentTarget then
+                RemoveESP(currentTarget)
+            end
+
+            currentTarget = selectedPlayer.Character
+            CreateCornerESP(currentTarget)
+        end
+
+    else
+        -- no selected target
+        if currentTarget then
+            RemoveESP(currentTarget)
+            currentTarget = nil
+        end
+        return
+    end
+
+    ---------------------------------------------------------------------
+    -- Safety cleanup for any ESP not the current target
+    ---------------------------------------------------------------------
+    for character in pairs(ESP) do
+        if character ~= currentTarget then
+            RemoveESP(character)
+        end
+    end
+
+    ---------------------------------------------------------------------
+    -- Local player exclusion check (AGAIN - hard safety)
+    ---------------------------------------------------------------------
+    if currentTarget == player.Character then
+        RemoveESP(currentTarget)
+        currentTarget = nil
+        return
+    end
+
+    ---------------------------------------------------------------------
+    -- Update the target's ESP box
+    ---------------------------------------------------------------------
+    if currentTarget and ESP[currentTarget] then
+
+        -- model deleted?
+        if not currentTarget.Parent then
+            RemoveESP(currentTarget)
+            currentTarget = nil
+            return
+        end
+
+        local hrp = currentTarget:FindFirstChild("HumanoidRootPart")
+        if not hrp then
+            for _, line in ipairs(ESP[currentTarget].lines) do
+                line.Visible = false
+            end
+            return
+        end
+
+        local screenPos, onScreen = camera:WorldToViewportPoint(hrp.Position)
+        local lines = ESP[currentTarget].lines
+
+        if onScreen then
+
+            -- calculate box size
+            local top = camera:WorldToViewportPoint(hrp.Position + Vector3.new(0, 3, 0))
+            local bottom = camera:WorldToViewportPoint(hrp.Position - Vector3.new(0, 3, 0))
+            local height = math.abs(top.Y - bottom.Y)
+            local width = height * 0.6
+
+            local x = screenPos.X
+            local y = screenPos.Y
+
+            local tl = Vector2.new(x - width / 2, y - height / 2)
+            local tr = Vector2.new(x + width / 2, y - height / 2)
+            local bl = Vector2.new(x - width / 2, y + height / 2)
+            local br = Vector2.new(x + width / 2, y + height / 2)
+            local c = height * 0.2 -- corner length
+
+            -- Top Left
+            lines[1].From = tl
+            lines[1].To = tl + Vector2.new(c, 0)
+            lines[2].From = tl
+            lines[2].To = tl + Vector2.new(0, c)
+
+            -- Top Right
+            lines[3].From = tr
+            lines[3].To = tr - Vector2.new(c, 0)
+            lines[4].From = tr
+            lines[4].To = tr + Vector2.new(0, c)
+
+            -- Bottom Left
+            lines[5].From = bl
+            lines[5].To = bl + Vector2.new(c, 0)
+            lines[6].From = bl
+            lines[6].To = bl - Vector2.new(0, c)
+
+            -- Bottom Right
+            lines[7].From = br
+            lines[7].To = br - Vector2.new(c, 0)
+            lines[8].From = br
+            lines[8].To = br - Vector2.new(0, c)
+
+            for _, line in ipairs(lines) do
+                line.Visible = true
+            end
+
+        else
+            for _, line in ipairs(lines) do
+                line.Visible = false
+            end
+        end
+    end
+end)
+
+-- func
+-- for tping
+task.spawn(function()
+    while true do
+        task.wait()
+        if spinning and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+            local hrp = player.Character.HumanoidRootPart
+            hrp.CFrame = hrp.CFrame * CFrame.Angles(0, math.rad(15), 0) -- spin speed
+        end
+    end
+end)
+
+local playerNames = {}
+for _, player in ipairs(Players:GetPlayers()) do
+    table.insert(playerNames, player.Name)
+end
+
+-- Update humanoid on spawn
+player.CharacterAdded:Connect(function(char)
+    Humanoid = char:WaitForChild("Humanoid")
+end)
+
+-- Set humanoid if already spawned
+if player.Character then
+    Humanoid = player.Character:FindFirstChild("Humanoid")
+end
+
+-- equip sword
+local function equipFirstTool()
+	-- Wait until the character and Humanoid are ready
+	local character = player.Character or player.CharacterAdded:Wait()
+	character:WaitForChild("Humanoid")
+
+	-- Wait for the backpack to exist and have something in it
+	local backpack = player:WaitForChild("Backpack")
+
+	-- Find the first tool
+	local tool = character:FindFirstChildOfClass("Tool") or backpack:FindFirstChildOfClass("Tool")
+	if not tool then
+		warn("No tool found to equip")
+		return
+	end
+
+	-- Equip safely
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		pcall(function()
+			humanoid:EquipTool(tool)
+			print("equipped tool:", tool.Name)
+		end)
+	end
+end
+
+--// Safezone check
+local function isInsideSafeZone()
+	local pos = hrp.Position
+	return (pos.X >= minX and pos.X <= maxX and pos.Z >= minZ and pos.Z <= maxZ)
+end
+
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+local Window = Rayfield:CreateWindow({
+   Name = "A2A tping menu",
+   Icon = 0, -- Icon in Topbar. Can use Lucide Icons (string) or Roblox Image (number). 0 to use no icon (default).
+   LoadingTitle = "A2A tping menu",
+   LoadingSubtitle = "@tomboyobliterator_24315",
+   ShowText = "Rayfield", -- for mobile users to unhide rayfield, change if you'd like
+   Theme = "Amethyst", -- Check https://docs.sirius.menu/rayfield/configuration/themes
+
+   ToggleUIKeybind = Enum.KeyCode.LeftControl, -- The keybind to toggle the UI visibility (string like "K" or Enum.KeyCode)
+
+   DisableRayfieldPrompts = false,
+   DisableBuildWarnings = false, -- Prevents Rayfield from warning when the script has a version mismatch with the interface
+
+   ConfigurationSaving = {
+      Enabled = false,
+      FolderName = nil, -- Create a custom folder for your hub/game
+      FileName = "A2A tp menu"
+   },
+
+   Discord = {
+      Enabled = true, -- Prompt the user to join your Discord server if their executor supports it
+      Invite = "discord.gg/j3BR6Ces", -- The Discord invite code, do not include discord.gg/. E.g. discord.gg/ ABCD would be ABCD
+      RememberJoins = true -- Set this to false to make them join the discord every time they load it up
+   },
+
+   KeySystem = false, -- Set this to true to use our key system
+   KeySettings = {
+      Title = "Untitled",
+      Subtitle = "Key System",
+      Note = "No method of obtaining the key is provided", -- Use this to tell the user how to get a key
+      FileName = "Key", -- It is recommended to use something unique as other scripts using Rayfield may overwrite your key file
+      SaveKey = true, -- The user's key will be saved, but if you change the key, they will be unable to use your script
+      GrabKeyFromSite = false, -- If this is true, set Key below to the RAW site you would like Rayfield to get the key from
+      Key = {"Hello"} -- List of keys that will be accepted by the system, can be RAW file links (pastebin, github etc) or simple strings ("hello","key22")
+   }
+})
+
+Rayfield:Notify({
+   Title = "LOADED",
+   Content = "debug",
+   Duration = 5,
+   Image = 4483362458,
+})
+
+local TeleportTab = Window:CreateTab("teleport", "wand") -- Title, Image
+local Section = TeleportTab:CreateSection("teleport")
+
+local Input = TeleportTab:CreateInput({
+    Name = "select player",
+    CurrentValue = "",
+    PlaceholderText = "select player",
+    RemoveTextAfterFocusLost = false,
+    Flag = "Input1",
+    Callback = function(Text)
+        Text = Text:lower()
+        local matchedPlayer = nil
+
+        for _, player in ipairs(Players:GetPlayers()) do
+            local username = player.Name:lower()
+            local displayName = player.DisplayName:lower()
+
+            if username:find(Text) or displayName:find(Text) then
+                matchedPlayer = player
+                break
+            end
+        end
+
+        if matchedPlayer then
+            selectedPlayerName = matchedPlayer.Name
+            print("selected player: " .. matchedPlayer.Name .. " (display name: " .. matchedPlayer.DisplayName .. ")")
+        else
+            warn("no matching player for: " .. Text)
+            selectedPlayerName = nil
+        end
+    end,
+})
+
+local Toggle = TeleportTab:CreateToggle({
+	Name = "view player",
+	CurrentValue = false,
+	Flag = "Toggle1",
+	Callback = function(Value)
+		viewing = Value
+
+		if Value then
+			-- Function to start spectating a target player
+			local function startViewing(targetName)
+				if not targetName then
+					warn("No player selected to view.")
+					return
+				end
+
+				local targetPlayer = Players:FindFirstChild(targetName)
+				if not (targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("Humanoid")) then
+					warn("Target player not available.")
+					return
+				end
+
+				camera.CameraSubject = targetPlayer.Character.Humanoid
+				print("now viewing:", targetName)
+
+				-- Disconnect any previous listeners
+				if spectateConnection then
+					spectateConnection:Disconnect()
+					spectateConnection = nil
+				end
+				if playerLeaveConnection then
+					playerLeaveConnection:Disconnect()
+					playerLeaveConnection = nil
+				end
+
+				-- Listen for target player death
+				local humanoid = targetPlayer.Character:FindFirstChild("Humanoid")
+				if humanoid then
+					spectateConnection = humanoid.Died:Connect(function()
+						camera.CameraSubject = player.Character and player.Character:FindFirstChild("Humanoid") or camera.CameraSubject
+						print("player died. stopped viewing.")
+						Toggle:Set(false)
+					end)
+				end
+
+				-- Listen for target player leaving
+				playerLeaveConnection = Players.PlayerRemoving:Connect(function(leavingPlayer)
+					if leavingPlayer == targetPlayer then
+						camera.CameraSubject = player.Character and player.Character:FindFirstChild("Humanoid") or camera.CameraSubject
+						print("player left. stopped viewing.")
+						Toggle:Set(false)
+					end
+				end)
+			end
+
+			-- Start viewing the currently selected player
+			startViewing(selectedPlayerName)
+			lastSelectedPlayerName = selectedPlayerName
+
+			-- Background loop to detect selected player change
+			task.spawn(function()
+				while viewing do
+					if selectedPlayerName ~= lastSelectedPlayerName then
+						startViewing(selectedPlayerName)
+						lastSelectedPlayerName = selectedPlayerName
+					end
+					task.wait(0.1) -- ✅ checks every 0.1 second
+				end
+			end)
+
+		else
+			-- Stop spectating and clean up
+			if spectateConnection then
+				spectateConnection:Disconnect()
+				spectateConnection = nil
+			end
+			if playerLeaveConnection then
+				playerLeaveConnection:Disconnect()
+				playerLeaveConnection = nil
+			end
+
+			if player.Character and player.Character:FindFirstChild("Humanoid") then
+				camera.CameraSubject = player.Character.Humanoid
+				print("stopped viewing player.")
+			end
+		end
+	end,
+})
+
+local Divider = TeleportTab:CreateDivider()
+
+local Button = TeleportTab:CreateButton({
+    Name = "teleport",
+    Callback = function()
+        if not selectedPlayerName then
+            warn("No player selected.")
+            return
+        end
+
+        local targetPlayer = Players:FindFirstChild(selectedPlayerName)
+        if not (targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart")) then
+            warn("Target player not found or not loaded.")
+            return
+        end
+
+        local myChar = player.Character
+        if not (myChar and myChar:FindFirstChild("HumanoidRootPart")) then
+            warn("Your character is not fully loaded.")
+            return
+        end
+
+        local myHRP = myChar.HumanoidRootPart
+        local originalCFrame = myHRP.CFrame
+
+        -- equip tool        
+        equipFirstTool()
+
+        -- START SPINNING
+        spinning = true
+
+        -- === FIRST TWEEN TO TARGET ===
+        local targetCFrame1 = targetPlayer.Character.HumanoidRootPart.CFrame
+        local tweenTo1 = TweenService:Create(myHRP, TweenInfo.new(tweenDuration, Enum.EasingStyle.Sine, Enum.EasingDirection.Out), {
+            CFrame = targetCFrame1
+        })
+        tweenTo1:Play()
+        tweenTo1.Completed:Wait()
+
+        task.wait(.1)
+
+        -- === SECOND TWEEN TO TARGET (fetch latest position) ===
+        if targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
+            local targetCFrame2 = targetPlayer.Character.HumanoidRootPart.CFrame
+            local tweenTo2 = TweenService:Create(myHRP, TweenInfo.new(tweenDuration, Enum.EasingStyle.Sine, Enum.EasingDirection.Out), {
+                CFrame = targetCFrame2
+            })
+            tweenTo2:Play()
+            tweenTo2.Completed:Wait()
+        end
+
+        task.wait(.15)
+
+        -- === TWEEN BACK TO ORIGINAL POSITION ===
+        local tweenBack = TweenService:Create(myHRP, TweenInfo.new(tweenDuration, Enum.EasingStyle.Sine, Enum.EasingDirection.Out), {
+            CFrame = originalCFrame
+        })
+        tweenBack:Play()
+        tweenBack.Completed:Wait()
+
+        -- STOP SPINNING
+        spinning = false
+    end,
+})
+
+local Toggle = TeleportTab:CreateToggle({
+	Name = "auto tp",
+	CurrentValue = false,
+	Flag = "AutoTeleportToggle",
+	Callback = function(Value)
+		autoTeleportEnabled = Value
+
+		if Value then
+			task.spawn(function()
+
+				local outsideStart = nil
+				local hasTeleportedThisExit = false
+
+				-- spin loop (runs only when `spinning` is true)
+				task.spawn(function()
+					while true do
+						task.wait()
+						if spinning and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+							local hrp = player.Character.HumanoidRootPart
+							hrp.CFrame = hrp.CFrame * CFrame.Angles(0, math.rad(15), 0) -- rotate 15° per frame
+						end
+					end
+				end)
+
+				while autoTeleportEnabled do
+					task.wait(0.1)
+
+					-- get target player
+					local targetPlayer = PlayerService:FindFirstChild(selectedPlayerName)
+					if not targetPlayer or not targetPlayer.Character then
+						outsideStart = nil
+						hasTeleportedThisExit = false
+						continue
+					end
+
+					local targetHRP = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+					if not targetHRP then
+						outsideStart = nil
+						hasTeleportedThisExit = false
+						continue
+					end
+
+					-- check if target is inside safezone
+					local pos = targetHRP.Position
+					local insideSafeZone = (pos.X >= minX and pos.X <= maxX and pos.Z >= minZ and pos.Z <= maxZ)
+
+					if not insideSafeZone then
+						if not outsideStart then
+							outsideStart = tick()
+							hasTeleportedThisExit = false
+						end
+
+						if tick() - outsideStart >= autoTPDelay and not hasTeleportedThisExit then
+							local myChar = player.Character or player.CharacterAdded:Wait()
+							local myHRP = myChar:FindFirstChild("HumanoidRootPart")
+							if myHRP then
+								local originalCFrame = myHRP.CFrame
+
+								equipFirstTool()
+
+								-- START SPINNING
+								spinning = true
+
+								-- First teleport tween
+								local tween1 = TweenService:Create(myHRP, TweenInfo.new(tweenDuration, Enum.EasingStyle.Sine, Enum.EasingDirection.Out), {
+									CFrame = targetHRP.CFrame
+								})
+								tween1:Play()
+								tween1.Completed:Wait()
+
+								task.wait(0.1) -- short delay between teleports
+
+								-- Second teleport tween (fetch latest position)
+								if targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
+									local tween2 = TweenService:Create(myHRP, TweenInfo.new(tweenDuration, Enum.EasingStyle.Sine, Enum.EasingDirection.Out), {
+										CFrame = targetPlayer.Character.HumanoidRootPart.CFrame
+									})
+									tween2:Play()
+									tween2.Completed:Wait()
+								end
+
+								task.wait(0.15)
+
+								-- tween back to original position
+								local tweenBack = TweenService:Create(myHRP, TweenInfo.new(tweenDuration, Enum.EasingStyle.Sine, Enum.EasingDirection.Out), {
+									CFrame = originalCFrame
+								})
+								tweenBack:Play()
+								tweenBack.Completed:Wait()
+
+								-- STOP SPINNING
+								spinning = false
+
+								hasTeleportedThisExit = true
+							end
+						end
+					else
+						-- reset if target back inside
+						outsideStart = nil
+						hasTeleportedThisExit = false
+					end
+				end
+
+			end)
+		end
+	end,
+})
+
+local Slider = TeleportTab:CreateSlider({
+    Name = "auto tp delay",
+    Range = {0, 1},
+    Increment = 0.1,
+    Suffix = "delay",
+    CurrentValue = 0.2,
+    Flag = "Slider1",
+    Callback = function(Value)
+        autoTPDelay = Value
+    end,
+})
+
+local Section = TeleportTab:CreateSection("sword reach")
+
+local Toggle = TeleportTab:CreateToggle({
+    Name = "sword reach/amp",
+    CurrentValue = false,
+    Flag = "MegaToggle",
+    Callback = function(Value)
+
+        --------------------------------------------------------------------
+        -- CLEANUP FIRST
+        --------------------------------------------------------------------
+        local RS = game:GetService("RunService")
+        local Players = game:GetService("Players")
+        local player = Players.LocalPlayer
+
+        -- kill old loops
+        if ftiConnection then ftiConnection:Disconnect() ftiConnection = nil end
+        if cbringConnection then cbringConnection:Disconnect() cbringConnection = nil end
+        if hitboxConnection then hitboxConnection:Disconnect() hitboxConnection = nil end
+        if damageAmpConnection then damageAmpConnection:Disconnect() damageAmpConnection = nil end
+
+        --------------------------------------------------------------------
+        -- OFF STATE (restore everything)
+        --------------------------------------------------------------------
+        if not Value then
+            getgenv().FTI_REACH_DISTANCE = 0
+            getgenv().Reach = 0
+            getgenv().HeadSize = 0
+            getgenv().Disabled = false
+            getgenv().DamageAmpEnabled = false
+
+            -- restore HRP sizes
+            for _, v in ipairs(Players:GetPlayers()) do
+                if v ~= player and v.Character then
+                    pcall(function()
+                        local hrp = v.Character:FindFirstChild("HumanoidRootPart")
+                        if hrp then
+                            hrp.Size = Vector3.new(2,2,1)
+                            hrp.Transparency = 1
+                            hrp.CanCollide = true
+                        end
+                    end)
+                end
+            end
+
+            return
+        end
+
+        --------------------------------------------------------------------
+        -- ON STATE (enable all modules)
+        --------------------------------------------------------------------
+        -- set globals ON
+        getgenv().FTI_REACH_DISTANCE = 1000
+        getgenv().Reach = 100
+        getgenv().HeadSize = 100
+        getgenv().Disabled = true
+        getgenv().DamageAmpEnabled = true
+
+        --------------------------------------------------------------------
+        -- 1. FTI REACH
+        --------------------------------------------------------------------
+        ftiConnection = RS.RenderStepped:Connect(function()
+            local char = player.Character
+            if not char then return end
+
+            local root = char:FindFirstChild("HumanoidRootPart")
+            local tool = char:FindFirstChildOfClass("Tool")
+            local handle = tool and (tool:FindFirstChild("Handle") or tool:FindFirstChildWhichIsA("BasePart"))
+
+            if not (root and tool and handle) then return end
+            if handle.Position.X ~= handle.Position.X then return end
+
+            for _, plr in ipairs(Players:GetPlayers()) do
+                if plr ~= player and plr.Character then
+                    local enemyRoot = plr.Character:FindFirstChild("HumanoidRootPart")
+                    if not enemyRoot then continue end
+
+                    if (root.Position - enemyRoot.Position).Magnitude <= getgenv().FTI_REACH_DISTANCE then
+                        
+                        -- fling enemy
+                        local diff = handle.Position - enemyRoot.Position
+                        if diff.Magnitude == 0 or diff.Magnitude ~= diff.Magnitude then continue end
+                        enemyRoot.Velocity = diff.Unit * 40
+
+                        -- fire touches
+                        for _, part in ipairs(plr.Character:GetChildren()) do
+                            if part:IsA("BasePart") then
+                                firetouchinterest(handle, part, 0)
+                                firetouchinterest(handle, part, 1)
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+
+        --------------------------------------------------------------------
+        -- 2. CBRING REACH
+        --------------------------------------------------------------------
+        cbringConnection = RS.Stepped:Connect(function()
+            pcall(function()
+                local char = player.Character
+                local tool = char and char:FindFirstChildOfClass("Tool")
+                local handle = tool and tool:FindFirstChild("Handle")
+                if not handle then return end
+
+                for _, v in ipairs(Players:GetPlayers()) do
+                    if v ~= player and v.Character and v.Character:FindFirstChild("Torso") then
+                        if (char.Torso.Position - v.Character.Torso.Position).Magnitude <= getgenv().Reach then
+
+                            local limbs = { "Left Arm", "Right Arm", "Left Leg", "Right Leg" }
+                            for _, limbName in ipairs(limbs) do
+                                local limb = v.Character:FindFirstChild(limbName)
+                                if limb then
+                                    limb:BreakJoints()
+                                    limb.Transparency = 1
+                                    limb.CanCollide = false
+                                    limb.CFrame = char.HumanoidRootPart.CFrame * CFrame.new(1,0,-3.5)
+                                end
+                            end
+                        end
+                    end
+                end
+            end)
+        end)
+
+        --------------------------------------------------------------------
+        -- 3. HITBOX EXPANDER
+        --------------------------------------------------------------------
+        hitboxConnection = RS.RenderStepped:Connect(function()
+            if getgenv().Disabled then
+                for _, v in ipairs(Players:GetPlayers()) do
+                    if v ~= player and v.Character then
+                        local hrp = v.Character:FindFirstChild("HumanoidRootPart")
+                        if hrp then
+                            pcall(function()
+                                hrp.Size = Vector3.new(getgenv().HeadSize, getgenv().HeadSize, getgenv().HeadSize)
+                                hrp.Transparency = 1
+                                hrp.CanCollide = false
+                            end)
+                        end
+                    end
+                end
+            end
+        end)
+
+        --------------------------------------------------------------------
+        -- 4. DAMAGE AMPLIFIER
+        --------------------------------------------------------------------
+        local function startDamageLoop(character)
+            local backpack = player:WaitForChild("Backpack")
+            local tool = character:FindFirstChildOfClass("Tool") or backpack:FindFirstChildOfClass("Tool")
+            if not tool then return end
+
+            local handle = tool:FindFirstChild("Handle") or tool:FindFirstChildWhichIsA("BasePart")
+            if not handle then return end
+
+            damageAmpConnection = RS.RenderStepped:Connect(function()
+                if not getgenv().DamageAmpEnabled then return end
+
+                local parts = workspace:GetPartBoundsInBox(handle.CFrame, handle.Size * 1.8)
+                for _, part in ipairs(parts) do
+                    pcall(function()
+                        local hum = part.Parent:FindFirstChildOfClass("Humanoid")
+                        if hum and part.Parent ~= character then
+                            firetouchinterest(part, handle, 0)
+                            firetouchinterest(part, handle, 1)
+                        end
+                    end)
+                end
+            end)
+        end
+
+        player.CharacterAdded:Connect(startDamageLoop)
+        if player.Character then startDamageLoop(player.Character) end
+
+    end
+})
+
+local PlayerTab = Window:CreateTab("player", "user")
+local Section = PlayerTab:CreateSection("player")
+
+local Slider = PlayerTab:CreateSlider({
+	Name = "cframe walkspeed",
+	Range = {0, 7}, -- additive speed
+	Increment = 1,
+	Suffix = "walkspeed",
+	CurrentValue = 0,
+	Flag = "Slider3",
+	Callback = function(Value)
+		local additiveSpeed = Value
+		local Character = player.Character
+		if not Character then return end
+		local HumanoidRootPart = Character:FindFirstChild("HumanoidRootPart")
+		local Humanoid = Character:FindFirstChildOfClass("Humanoid")
+		if not HumanoidRootPart or not Humanoid then return end
+
+		-- Disconnect previous loop if exists
+		if _G.CFWalkLoop then
+			_G.CFWalkLoop:Disconnect()
+			_G.CFWalkLoop = nil
+		end
+
+		-- Continuous CFrame movement based on input
+		local UserInputService = game:GetService("UserInputService")
+		local RunService = game:GetService("RunService")
+
+		_G.CFWalkLoop = RunService.RenderStepped:Connect(function(deltaTime)
+			local moveDir = Vector3.new(0, 0, 0)
+
+			if UserInputService:IsKeyDown(Enum.KeyCode.W) then moveDir = moveDir + camera.CFrame.LookVector end
+			if UserInputService:IsKeyDown(Enum.KeyCode.S) then moveDir = moveDir - camera.CFrame.LookVector end
+			if UserInputService:IsKeyDown(Enum.KeyCode.A) then moveDir = moveDir - camera.CFrame.RightVector end
+			if UserInputService:IsKeyDown(Enum.KeyCode.D) then moveDir = moveDir + camera.CFrame.RightVector end
+
+			moveDir = Vector3.new(moveDir.X, 0, moveDir.Z)
+			if moveDir.Magnitude > 0 then
+				moveDir = moveDir.Unit
+				-- Move by additive speed only, without interfering with Humanoid's natural movement
+				HumanoidRootPart.CFrame = HumanoidRootPart.CFrame + moveDir * additiveSpeed * deltaTime
+			end
+		end)
+	end,
+})
+
+local Slider = PlayerTab:CreateSlider({
+	Name = "jump height",
+	Range = {7.2, 15},
+	Increment = 0.1,
+	Suffix = "jump height",
+	CurrentValue = 7.2,
+	Flag = "Slider2",
+	Callback = function(Value)
+		local currentJumpHeight = Value
+
+		local function applyJumpSettings()
+			local char = player.Character or player.CharacterAdded:Wait()
+			local hum = char:FindFirstChildOfClass("Humanoid") or char:WaitForChild("Humanoid")
+
+			-- Disable jump power usage and apply jump height
+			hum.UseJumpPower = false
+			hum.JumpHeight = currentJumpHeight
+		end
+
+		-- Apply immediately
+		applyJumpSettings()
+
+		-- Reapply every time the player respawns
+		player.CharacterAdded:Connect(function()
+			task.wait(0.2)
+			applyJumpSettings()
+		end)
+	end,
+})
+
+local Slider = PlayerTab:CreateSlider({
+	Name = "hip height",
+	Range = {0, 15},
+	Increment = 1,
+	Suffix = "hip height",
+	CurrentValue = 0,
+	Flag = "Slider1",
+	Callback = function(Value)
+		local Character = player.Character
+		if not Character then return end
+
+		local Humanoid = Character:FindFirstChildOfClass("Humanoid")
+		if Humanoid then
+			Humanoid.HipHeight = Value
+		end
+	end,
+})
+
+local Divider = PlayerTab:CreateDivider()
+
+local Toggle = PlayerTab:CreateToggle({
+    Name = "spinbot",
+    CurrentValue = false,
+    Flag = "ToggleSpin",
+    Callback = function(Value)
+        spinEnabled = Value
+
+        if Value then
+            if spinConnection then
+                spinConnection:Disconnect()
+            end
+
+            spinConnection = RunService.RenderStepped:Connect(function(dt)
+                local char = player.Character
+                if not char then return end
+
+                local hrp = char:FindFirstChild("HumanoidRootPart")
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if not hrp or not hum then return end
+
+                -- Disable animations overriding rotation
+                hum.AutoRotate = false
+
+                -- Apply rotation (R6 safe)
+                hrp.CFrame = hrp.CFrame * CFrame.Angles(0, math.rad(spinSpeed * dt * 60), 0)
+            end)
+
+        else
+            -- stop spinning
+            if spinConnection then
+                spinConnection:Disconnect()
+                spinConnection = nil
+            end
+
+            -- Restore animations
+            local char = player.Character
+            if char and char:FindFirstChildOfClass("Humanoid") then
+                char:FindFirstChildOfClass("Humanoid").AutoRotate = true
+            end
+        end
+    end,
+})
+
+local Slider = PlayerTab:CreateSlider({
+    Name = "spinbot speed",
+    Range = {10, 100},
+    Increment = 10,
+    Suffix = "speed",
+    CurrentValue = 10,
+    Flag = "Slider1",
+    Callback = function(Value)
+        spinSpeed = Value
+    end,
+})
+
+local WorldTab = Window:CreateTab("world", "earth")
+local Section = WorldTab:CreateSection("world")
+
+local Toggle = WorldTab:CreateToggle({
+    Name = "baseplate expander",
+    CurrentValue = false,
+    Flag = "Toggle1",
+    Callback = function(Value)
+        if Value then
+            -- Create Baseplate2 if it doesn't exist
+            if not workspace:FindFirstChild("Baseplate2") then
+                local baseplate2 = workspace.Baseplate:Clone()
+                baseplate2.Name = "Baseplate2"
+                baseplate2.Size = Vector3.new(1000,10,1000)
+                baseplate2.Transparency = 0.6
+                baseplate2.Anchored = true
+                -- Slightly offset in Y to prevent z-fighting / flashing
+                baseplate2.Position = workspace.Baseplate.Position - Vector3.new(0,0.01,0)
+                baseplate2.Parent = workspace
+            end
+
+            local baseplate2 = workspace:FindFirstChild("Baseplate2")
+
+            -- Loop to constantly enforce size and position
+            spawn(function()
+                while Toggle.CurrentValue and baseplate2 and baseplate2.Parent do
+                    baseplate2.Size = Vector3.new(1000,10,1000)
+                    baseplate2.Position = workspace.Baseplate.Position - Vector3.new(0,0.1,0)
+                    wait(0.1)
+                end
+            end)
+        else
+            -- Remove Baseplate2 when toggle is off
+            local baseplate2 = workspace:FindFirstChild("Baseplate2")
+            if baseplate2 then
+                baseplate2:Destroy()
+            end
+        end
+    end,
+})
+
+local ColorPicker = WorldTab:CreateColorPicker({
+    Name = "baseplate color",
+    Color = workspace.Baseplate.Color,
+    Flag = "ColorPicker1",
+    Callback = function(Value)
+        workspace.Baseplate.Color = Value
+    end
+})
+
+local Divider = WorldTab:CreateDivider()
+
+local Slider = WorldTab:CreateSlider({
+    Name = "time of day",
+    Range = {0, 24},
+    Increment = .5,
+    Suffix = "hour",
+    CurrentValue = 14,
+    Flag = "Slider1",
+    Callback = function(Value)
+        -- Directly set Lighting.ClockTime
+        game.Lighting.ClockTime = Value
+    end,
+})
+
+-- BRIGHTNESS SLIDER
+local Slider = WorldTab:CreateSlider({
+    Name = "brightness",
+    Range = {0, 10},
+    Increment = 0.5,
+    CurrentValue = game.Lighting.Brightness,
+    Flag = "Brightness",
+    Callback = function(Value)
+        game.Lighting.Brightness = Value
+    end
+})
+
+local ColorPicker = WorldTab:CreateColorPicker({
+    Name = "ambient color",
+    Color = game.Lighting.Ambient,
+    Flag = "AmbientColor",
+    Callback = function(Value)
+        game.Lighting.Ambient = Value
+		game.Lighting.OutdoorAmbient = Value
+    end
+})
+
+local MiscTab = Window:CreateTab("misc", "traffic-cone")
+local Section = MiscTab:CreateSection("soda")
+
+local Toggle = MiscTab:CreateToggle({
+	Name = "soda hitbox expander",
+	CurrentValue = false,
+	Flag = "Toggle1",
+	Callback = function(Value)
+		if Value then
+			-- Function to handle qualifying parts
+			local function setupPart(part)
+				if not part:IsA("BasePart") then return end
+				if managed[part] then return end
+				if not string.match(part.Name, pattern) then return end
+				if string.find(part.Name, "visualizer") then return end
+
+				-- Store original size for restoration later
+				managed[part] = {
+					originalSize = part.Size,
+					originalTransparency = part.Transparency,
+				}
+
+				-- Clone BEFORE modifying the original
+				local clone = part:Clone()
+				clone.Name = part.Name .. " visualizer"
+				clone.Anchored = part.Anchored
+				clone.CanCollide = false
+				clone.Transparency = part.Transparency
+				clone.Parent = workspace
+
+				-- Modify original (invisible, bigger hitbox)
+				part.Transparency = 1
+				part.CanCollide = true
+				part.Size = TARGET_SIZE
+
+				-- Keep visualizer synced
+				local heartbeatConn
+				heartbeatConn = RunService.Heartbeat:Connect(function()
+					if not part or not part.Parent then
+						if clone and clone.Parent then
+							clone:Destroy()
+						end
+						if heartbeatConn then
+							heartbeatConn:Disconnect()
+						end
+						managed[part] = nil
+						return
+					end
+
+					if clone and clone.Parent then
+						clone.CFrame = part.CFrame
+					end
+				end)
+				table.insert(connections, heartbeatConn)
+			end
+
+			-- Handle all current parts
+			for _, obj in ipairs(workspace:GetDescendants()) do
+				setupPart(obj)
+			end
+
+			-- Handle new ones
+			local descAddedConn = workspace.DescendantAdded:Connect(function(obj)
+				task.wait(0.1)
+				setupPart(obj)
+			end)
+			table.insert(connections, descAddedConn)
+
+		else
+
+			-- Disconnect all connections
+			for _, conn in ipairs(connections) do
+				if conn then conn:Disconnect() end
+			end
+			connections = {}
+
+			-- Restore all managed parts
+			for part, data in pairs(managed) do
+				if part and part.Parent then
+					-- Destroy visualizer
+					local vis = workspace:FindFirstChild(part.Name .. " visualizer")
+					if vis then vis:Destroy() end
+
+					-- Restore size + transparency
+					part.Size = data.originalSize
+					part.Transparency = data.originalTransparency
+				end
+			end
+
+			managed = {}
+		end
+	end,
+})
+
+local Section = MiscTab:CreateSection("spoof")
+
+local Input = MiscTab:CreateInput({
+    Name = "time spoof",
+    CurrentValue = tostring(game:GetService("Players").LocalPlayer:WaitForChild("leaderstats"):WaitForChild("Time").Value),
+    PlaceholderText = "time spoof",
+    RemoveTextAfterFocusLost = true,
+    Flag = "TimeSpoofInput",
+
+    Callback = function(Text)
+
+        -- locals INSIDE the callback so everything stays self-contained
+        local leaderstats = player:WaitForChild("leaderstats")
+        local timeValue = leaderstats:WaitForChild("Time")
+
+        -- empty = ignore
+        if Text == "" then return end
+
+        -- convert to number
+        local newTime = tonumber(Text)
+        if not newTime then
+            warn("must be a number")
+            return
+        end
+
+        -- set the time
+        pcall(function()
+            timeValue.Value = newTime
+        end)
+    end,
+})
+
+local Input = MiscTab:CreateInput({
+    Name = "tokens spoof",
+    CurrentValue = tostring(game:GetService("Players").LocalPlayer:WaitForChild("leaderstats"):WaitForChild("Tokens").Value),
+    PlaceholderText = "tokens spoof",
+    RemoveTextAfterFocusLost = true,
+    Flag = "TokenSpoofInput",
+
+    Callback = function(Text)
+
+        -- locals INSIDE the callback so everything stays self-contained
+        local leaderstats = player:WaitForChild("leaderstats")
+        local timeValue = leaderstats:WaitForChild("Tokens")
+
+        -- empty = ignore
+        if Text == "" then return end
+
+        -- convert to number
+        local newTime = tonumber(Text)
+        if not newTime then
+            warn("must be a number")
+            return
+        end
+
+        -- set the time
+        pcall(function()
+            timeValue.Value = newTime
+        end)
+    end,
+})
+
+local Input = MiscTab:CreateInput({
+    Name = "xp spoof",
+    CurrentValue = tostring(game:GetService("Players").LocalPlayer:WaitForChild("leaderstats"):WaitForChild("XP").Value),
+    PlaceholderText = "xp spoof",
+    RemoveTextAfterFocusLost = true,
+    Flag = "XPSpoofInput",
+
+    Callback = function(Text)
+
+        -- locals INSIDE the callback so everything stays self-contained
+        local leaderstats = player:WaitForChild("leaderstats")
+        local timeValue = leaderstats:WaitForChild("XP")
+
+        -- empty = ignore
+        if Text == "" then return end
+
+        -- convert to number
+        local newTime = tonumber(Text)
+        if not newTime then
+            warn("must be a number")
+            return
+        end
+
+        -- set the time
+        pcall(function()
+            timeValue.Value = newTime
+        end)
+    end,
+})
+
+local Section = MiscTab:CreateSection("misc")
+
+local Button = MiscTab:CreateButton({
+   Name = "rejoin",
+   Callback = function()
+    local ts = game:GetService("TeleportService")
+    local p = game:GetService("Players").LocalPlayer
+    ts:Teleport(game.PlaceId, p)
+   end,
+})
+
+local Button = MiscTab:CreateButton({
+   Name = "copy discord",
+   Callback = function()
+    setclipboard("discord.com/invite/UJjXfHU2ru")
+
+    Rayfield:Notify({
+        Title = "DISCORD LINK",
+        Content = "copied to clipboard",
+        Duration = 5,
+        Image = 4483362458,
+    })
+   end,
+})
+
+local Button = MiscTab:CreateButton({
+   Name = "destroy ui",
+   Callback = function()
+    Rayfield:Destroy()
+   end,
+})
+
+
+Rayfield:LoadConfiguration()
+
+if not checkintegrity() then LPH_CRASH() end
